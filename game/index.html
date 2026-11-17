@@ -3,17 +3,80 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Block Dodger</title>
+<title>Sunset Bay — Open-World Crime</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #11141b; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a141c; font-family: 'Segoe UI', system-ui, sans-serif; }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  /* Read aloud, never shown: the status line screen readers announce. */
-  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+  /* --- HUD --- */
+  #hud { position: fixed; inset: 0; pointer-events: none; color: #fff; display: none; z-index: 5; }
+  #top-right { position: absolute; top: 14px; right: 16px; text-align: right; text-shadow: 0 2px 4px rgba(0,0,0,.7); }
+  #money { font-size: 30px; font-weight: 800; color: #7dff8a; }
+  #clock { font-size: 18px; font-weight: 600; margin-top: 2px; }
+  #stars { font-size: 26px; letter-spacing: 3px; margin-top: 2px; }
+  #wanted-label { display: none; font-size: 12px; font-weight: 700; color: #ffd23a; letter-spacing: 2px; }
+  #top-left { position: absolute; top: 14px; left: 16px; width: 240px; }
+  #health-bar { height: 14px; background: rgba(0,0,0,.55); border: 2px solid rgba(255,255,255,.7); border-radius: 8px; overflow: hidden; }
+  #health-fill { height: 100%; width: 100%; background: #4fae5f; }
+  #health-label { font-size: 11px; font-weight: 700; letter-spacing: 2px; margin-top: 3px; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+  #objective { margin-top: 12px; font-size: 15px; font-weight: 600; line-height: 1.35; background: rgba(0,0,0,.5); padding: 8px 10px; border-left: 4px solid #ffc93a; border-radius: 4px; max-width: 300px; }
+  #hint { position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%); font-size: 14px; font-weight: 600; background: rgba(0,0,0,.55); padding: 7px 14px; border-radius: 20px; display: none; }
+  #speed { position: absolute; bottom: 20px; right: 210px; font-size: 26px; font-weight: 800; text-shadow: 0 2px 4px rgba(0,0,0,.8); display: none; }
+  #minimap { position: absolute; bottom: 14px; right: 14px; width: 180px; height: 180px; border: 2px solid rgba(255,255,255,.75); border-radius: 8px; background: rgba(12,26,18,.8); }
+  #banner { position: absolute; top: 26%; left: 50%; transform: translateX(-50%); text-align: center; display: none; }
+  #banner-title { font-size: 44px; font-weight: 900; letter-spacing: 4px; color: #ffc93a; text-shadow: 0 3px 0 #7a4a00, 0 6px 18px rgba(0,0,0,.7); }
+  #banner-sub { font-size: 18px; font-weight: 600; margin-top: 6px; text-shadow: 0 2px 6px rgba(0,0,0,.8); }
+
+  /* --- Full-screen overlays (title / pause / game over) --- */
+  #screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; background: linear-gradient(180deg, rgba(6,20,32,.55) 0%, rgba(6,20,32,.82) 100%); color: #fff; z-index: 10; padding: 20px; }
+  #screen-title { font-size: 72px; font-weight: 900; letter-spacing: 6px; color: #ffc93a; text-shadow: 0 4px 0 #7a4a00, 0 10px 30px rgba(0,0,0,.8); margin: 0; }
+  #screen-subtitle { font-size: 18px; letter-spacing: 6px; color: #9fd0e8; margin: 4px 0 18px; }
+  #screen-text { font-size: 16px; line-height: 1.6; max-width: 620px; color: #e8f2f8; }
+  #screen-text b { color: #ffc93a; }
+  .btn { pointer-events: auto; cursor: pointer; margin-top: 26px; padding: 14px 34px; font-size: 18px; font-weight: 800; letter-spacing: 1px; color: #1a1200; background: #ffc93a; border: none; border-radius: 8px; box-shadow: 0 4px 0 #a67c00; }
+  .btn:hover { background: #ffd95e; }
+  .btn.secondary { background: #e8f2f8; box-shadow: 0 4px 0 #7a8a96; margin-left: 12px; }
+  #screen-foot { position: absolute; bottom: 16px; font-size: 12px; color: rgba(255,255,255,.55); }
 </style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
 </head>
 <body>
-<canvas id="game" aria-label="Block Dodger: move the paddle left and right to dodge falling blocks and catch coins"></canvas>
-<p id="status" role="status" aria-live="polite"></p>
+<canvas id="game" aria-label="Sunset Bay: an open-world crime game"></canvas>
+
+<div id="hud">
+  <div id="top-left">
+    <div id="health-bar"><div id="health-fill"></div></div>
+    <div id="health-label">HEALTH</div>
+    <div id="objective"></div>
+  </div>
+  <div id="top-right">
+    <div id="money">$250</div>
+    <div id="clock">09:12</div>
+    <div id="stars">☆☆☆☆☆</div>
+    <div id="wanted-label">WANTED</div>
+  </div>
+  <div id="banner"><div id="banner-title"></div><div id="banner-sub"></div></div>
+  <div id="hint"></div>
+  <div id="speed"></div>
+  <canvas id="minimap" width="180" height="180"></canvas>
+</div>
+
+<div id="screen">
+  <h1 id="screen-title">SUNSET BAY</h1>
+  <div id="screen-subtitle">AN OPEN-WORLD CRIME STORY</div>
+  <p id="screen-text"></p>
+  <div>
+    <button class="btn" id="btn-start">▶ NEW GAME</button>
+    <button class="btn secondary" id="btn-continue" style="display:none">Continue</button>
+    <button class="btn" id="btn-resume" style="display:none">RESUME</button>
+    <button class="btn" id="btn-restart" style="display:none">PLAY AGAIN</button>
+    <button class="btn secondary" id="btn-quit" style="display:none">MAIN MENU</button>
+  </div>
+  <div id="screen-foot">Sunset Bay is an original game. Not affiliated with Rockstar Games or any other studio.</div>
+</div>
+
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

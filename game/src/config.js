@@ -1,61 +1,68 @@
-// Every tuning number and colour in one place. The playfield is a fixed 1280x720 logical area;
-// the renderer scales it to the window, so no rule below depends on the screen size.
+// Sunset Bay — shared tuning constants for the whole game.
+// Every number that more than one module needs lives here so the feel
+// of the city (sizes, speeds, money, wanted rules) can be tuned in one place.
 
-export const FIELD = { width: 1280, height: 720, groundY: 664 };
-
-/** The simulation's fixed step, in seconds: 60 updates a second whatever the display's rate. */
-export const STEP = 1 / 60;
+export const CITY = {
+  // One city block is a square of this size; roads run between blocks.
+  block: 42,
+  road: 14,
+  // Blocks per side of the square city grid.
+  blocks: 7,
+  // How far the beach and ocean extend past the southern edge.
+  beachWidth: 26,
+};
 
 export const PLAYER = {
-  width: 72,
-  height: 24,
-  speed: 560,
-  invulnerable: 1.5,
+  walkSpeed: 6,
+  runSpeed: 10.5,
+  radius: 0.55,
+  height: 1.8,
+  maxHealth: 100,
 };
 
-export const LIVES = 3;
-
-export const BLOCK = {
-  minWidth: 40,
-  maxWidth: 110,
-  height: 36,
-  speed: 240,
-  speedPerLevel: 30,
-  speedJitter: 90,
-  interval: 0.55,
-  intervalScale: 0.88,
-  minInterval: 0.14,
-  dodgePoints: 1,
+export const CAR = {
+  accel: 22,
+  brake: 34,
+  reverseAccel: 12,
+  maxSpeed: 34,
+  maxReverse: 10,
+  turnRate: 1.9,
+  // How quickly a car slows down on its own when no pedal is pressed.
+  drag: 0.6,
 };
 
-export const COIN = {
-  size: 24,
-  speed: 190,
-  speedPerLevel: 14,
-  interval: 1.4,
-  intervalJitter: 0.8,
-  points: 10,
+// Wanted stars: 0 = clean, 5 = the whole department is after you.
+export const WANTED = {
+  max: 5,
+  // Seconds without a new crime before one star fades away.
+  decaySeconds: 26,
+  // Police cars on the road per wanted star.
+  policePerStar: 1,
+  maxPolice: 5,
+  // How close a police car has to get to bust you on foot.
+  bustDistance: 2.2,
 };
 
-/** Seconds of play per level, and the last level: speeds and spawn rates stop growing there. */
-export const LEVEL = { seconds: 12, max: 12 };
+export const MISSIONS = [
+  {
+    id: 'package',
+    title: 'Package Run',
+    brief: 'Pick up the package at the pier, then deliver it to the hotel on Ocean Drive.',
+    reward: 500,
+  },
+  {
+    id: 'hotwheels',
+    title: 'Hot Wheels',
+    brief: 'Steal the red sports car parked by the plaza and bring it to the garage.',
+    reward: 800,
+  },
+  {
+    id: 'heat',
+    title: 'Heat',
+    brief: 'The cops are onto you. Lose them — survive 60 seconds with a 3-star wanted level.',
+    reward: 1200,
+  },
+];
 
-/** How many falling things can exist at once; the pool is allocated once, at boot. */
-export const POOL_SIZE = 64;
-
-export const PALETTE = {
-  backdrop: '#11141b',
-  sky: '#1b1f2a',
-  ground: '#2a3040',
-  player: '#4fc3f7',
-  block: '#e5534b',
-  coin: '#f2c94c',
-  panel: '#252b38',
-  text: '#eef1f5',
-  muted: '#8b93a3',
-};
-
-export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
-
-/** Where the best score is kept between visits (this browser only). */
-export const BEST_KEY = 'block-dodger.best';
+export const SAVE_KEY = 'sunset-bay-save-v1';
+export const START_MONEY = 250;

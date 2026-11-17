@@ -1,53 +1,103 @@
-// Keyboard and pointer input. Held keys give a steering direction; one-shot presses (start or
-// restart, pause) are queued as bit flags and taken once by the loop, so a press between two
-// frames is never lost and never counted twice.
+// Keyboard + mouse input. Tracks held keys, pointer-lock camera deltas,
+// and one-shot "pressed" actions (E to enter a car, F to punch, Esc to pause).
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
+export const ACTION_ENTER_CAR = 'enterCar';
+export const ACTION_PUNCH = 'punch';
+export const ACTION_PAUSE = 'pause';
+export const ACTION_CONFIRM = 'confirm';
 
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
+export function createInput(canvas) {
+  const keys = new Set();
+  // Actions pressed since the last call to consumeActions().
+  const pressed = new Set();
+  // Accumulated mouse movement since the last frame read.
+  let mouseDX = 0;
+  let mouseDY = 0;
+  let locked = false;
 
-export function createInput(target) {
-  let left = false;
-  let right = false;
-  let actions = 0;
+  function onKeyDown(event) {
+    if (event.repeat) return;
+    keys.add(event.code);
+    if (event.code === 'KeyE') pressed.add(ACTION_ENTER_CAR);
+    if (event.code === 'KeyF') pressed.add(ACTION_PUNCH);
+    if (event.code === 'Escape') pressed.add(ACTION_PAUSE);
+    if (event.code === 'Enter' || event.code === 'Space') pressed.add(ACTION_CONFIRM);
+    // Keep the page from scrolling on game keys.
+    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) {
+      event.preventDefault();
+    }
+  }
 
-  window.addEventListener('keydown', (event) => {
-    if (LEFT.has(event.code)) left = true;
-    else if (RIGHT.has(event.code)) right = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else return;
-    event.preventDefault();
-  });
-  window.addEventListener('keyup', (event) => {
-    if (LEFT.has(event.code)) left = false;
-    else if (RIGHT.has(event.code)) right = false;
-  });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
-  window.addEventListener('blur', () => {
-    left = false;
-    right = false;
-  });
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
-  });
+  function onKeyUp(event) {
+    keys.delete(event.code);
+  }
+
+  function onMouseMove(event) {
+    if (!locked) return;
+    mouseDX += event.movementX || 0;
+    mouseDY += event.movementY || 0;
+  }
+
+  function onMouseDown(event) {
+    if (event.button === 0) pressed.add(ACTION_PUNCH);
+  }
+
+  function onLockChange() {
+    locked = document.pointerLockElement === canvas;
+  }
+
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mousedown', onMouseDown);
+  document.addEventListener('pointerlockchange', onLockChange);
 
   return {
-    /** -1 for left, 1 for right, 0 for neither or both. */
-    direction() {
-      return (right ? 1 : 0) - (left ? 1 : 0);
+    isDown(code) {
+      return keys.has(code);
     },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
+    /** Forward / back / strafe as -1..1, from WASD or arrow keys. */
+    moveAxes() {
+      let forward = 0;
+      let strafe = 0;
+      if (keys.has('KeyW') || keys.has('ArrowUp')) forward += 1;
+      if (keys.has('KeyS') || keys.has('ArrowDown')) forward -= 1;
+      if (keys.has('KeyA') || keys.has('ArrowLeft')) strafe -= 1;
+      if (keys.has('KeyD') || keys.has('ArrowRight')) strafe += 1;
+      return { forward, strafe };
+    },
+    running() {
+      return keys.has('ShiftLeft') || keys.has('ShiftRight');
+    },
+    braking() {
+      return keys.has('Space');
+    },
+    /** Mouse delta since the last call; resets the accumulator. */
+    takeMouseDelta() {
+      const out = { dx: mouseDX, dy: mouseDY };
+      mouseDX = 0;
+      mouseDY = 0;
+      return out;
+    },
+    /** Actions pressed since the last call; clears the set. */
     takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
+      const out = new Set(pressed);
+      pressed.clear();
+      return out;
+    },
+    isLocked() {
+      return locked;
+    },
+    requestLock() {
+      try {
+        canvas.requestPointerLock();
+      } catch {
+        // Pointer lock can fail in some browsers; the game still works
+        // with the keyboard, so a failure here is not fatal.
+      }
+    },
+    releaseLock() {
+      if (document.pointerLockElement) document.exitPointerLock();
     },
   };
 }

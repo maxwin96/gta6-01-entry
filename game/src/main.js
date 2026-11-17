@@ -1,134 +1,549 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
-//
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
+// Sunset Bay — boot, game loop and state machine.
+// Title -> playing -> paused / busted / wasted, with a save in localStorage.
+// ?shot=cover|onfoot|chase|drive stages a scene for screenshots instead of
+// showing the title screen, then sets window.__shotReady once settled.
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
+import * as THREE from 'three';
+import { CITY, PLAYER, SAVE_KEY, START_MONEY, WANTED } from './config.js';
+import { createRng, clamp, flatDistance, formatClock } from './utils.js';
+import { createWorld } from './world.js';
+import { createPlayer } from './player.js';
+import { createCar, spawnParkedCars } from './vehicles.js';
+import { createTraffic, createPedestrians } from './traffic.js';
+import { createPolice } from './police.js';
+import { createMissions } from './missions.js';
+import { createHud } from './hud.js';
+import { createInput, ACTION_ENTER_CAR, ACTION_PUNCH, ACTION_PAUSE } from './input.js';
+import { createAudio } from './audio.js';
 
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
 const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+const seed = Number.isInteger(seedParam) ? seedParam : 1337;
+const rng = createRng(seed);
 
+// --- Renderer / scene -------------------------------------------------------
 const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-function readBest() {
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 1200);
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// --- World and actors --------------------------------------------------------
+const world = createWorld(scene, seed);
+const player = createPlayer(scene);
+const audio = createAudio();
+const input = createInput(canvas);
+const hud = createHud();
+const police = createPolice(scene, rng);
+const missions = createMissions(scene, world.places);
+const traffic = createTraffic(scene, rng, 10);
+const pedestrians = createPedestrians(scene, rng, 14);
+
+// Parked cars along the roads, plus the red sports car for mission 2.
+const parkedSpots = [
+  { x: -22.5, z: 84, heading: 0 },
+  { x: 33.5, z: -84, heading: Math.PI },
+  { x: 89.5, z: 28, heading: Math.PI / 2 },
+  { x: -145.5, z: -28, heading: Math.PI / 2 },
+  { x: 145.5, z: 140, heading: 0 },
+  { x: -78.5, z: -140, heading: Math.PI },
+];
+const parkedCars = spawnParkedCars(scene, rng, parkedSpots);
+const sportsCar = createCar(scene, {
+  x: world.places.sportsCar.x,
+  z: world.places.sportsCar.z,
+  heading: Math.PI / 2,
+  color: 0xd91e2e,
+  sporty: true,
+  parked: true,
+  id: 'sports-car',
+});
+const enterableCars = [...parkedCars, sportsCar];
+
+// --- Game state ---------------------------------------------------------------
+const game = {
+  mode: 'title', // title | playing | paused | over
+  money: START_MONEY,
+  missionIndex: 0,
+  inCar: null, // the car the player is driving, or null
+  cameraYaw: Math.PI,
+  cameraPitch: 0.34,
+  cameraDist: 8, // third-person distance on foot (staged shots pull back)
+  clockMinutes: 9 * 60 + 12,
+  crimeCooldown: 0,
+  ramCooldown: 0,
+  overReason: '',
+  prevMissionIndex: 0,
+  frames: 0,
+  shotStaged: false,
+};
+
+function saveGame() {
   try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
-  }
+    window.localStorage.setItem(
+      SAVE_KEY,
+      JSON.stringify({ money: game.money, missionIndex: missions.state.index }),
+    );
+  } catch {}
 }
 
-function saveBest(value) {
+function loadSave() {
   try {
-    window.localStorage.setItem(BEST_KEY, String(value));
+    const raw = window.localStorage.getItem(SAVE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (typeof data.money !== 'number' || typeof data.missionIndex !== 'number') return null;
+    return data;
   } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
+    return null;
   }
 }
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
+function nearestCar(maxDist) {
+  let best = null;
+  let bestDist = maxDist;
+  for (const car of enterableCars) {
+    const d = flatDistance(player.state.pos, car.state);
+    if (d < bestDist) {
+      best = car;
+      bestDist = d;
+    }
   }
-  requestAnimationFrame(paint);
+  return best;
 }
 
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
+function enterCar(car) {
+  game.inCar = car;
+  car.state.parked = false;
+  player.group.visible = false;
+  police.addCrime(2); // grand theft auto
+  audio.honk();
+  hud.setHint('WASD drive · Space brake · E exit');
+}
 
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
-  }
+function exitCar() {
+  const car = game.inCar;
+  if (!car) return;
+  game.inCar = null;
+  const side = { x: car.state.x + Math.cos(car.state.heading) * 2.4, z: car.state.z - Math.sin(car.state.heading) * 2.4 };
+  player.reset(side.x, side.z);
+  player.group.visible = true;
+  player.state.heading = car.state.heading;
+  game.cameraYaw = car.state.heading + Math.PI;
+  hud.setHint('');
+}
 
-  function startGame() {
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
-  }
+function gameOver(reason) {
+  if (game.mode !== 'playing') return;
+  game.mode = 'over';
+  game.overReason = reason;
+  input.releaseLock();
+  audio.busted();
+  audio.setEngine(0, false);
+  saveGame();
+  showScreen('over');
+}
 
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
+function startPlaying(fresh) {
+  const save = fresh ? null : loadSave();
+  game.money = save ? save.money : START_MONEY;
+  game.missionIndex = save ? save.missionIndex : 0;
+  game.prevMissionIndex = game.missionIndex;
+  game.inCar = null;
+  game.crimeCooldown = 0;
+  game.ramCooldown = 0;
+  game.clockMinutes = 9 * 60 + 12;
+  police.reset();
+  player.reset(world.places.spawn.x, world.places.spawn.z);
+  player.group.visible = true;
+  missions.startMission(game.missionIndex);
+  if (game.missionIndex === 2) police.setWanted(3);
+  game.cameraYaw = Math.PI;
+  game.cameraPitch = 0.34;
+  game.mode = 'playing';
+  hideScreens();
+  hud.show();
+  audio.unlock();
+  audio.startEngine();
+  input.requestLock();
+}
+
+// --- Screens (title / pause / game over) --------------------------------------
+const screenEl = document.getElementById('screen');
+const screenTitle = document.getElementById('screen-title');
+const screenText = document.getElementById('screen-text');
+const btnStart = document.getElementById('btn-start');
+const btnContinue = document.getElementById('btn-continue');
+const btnResume = document.getElementById('btn-resume');
+const btnRestart = document.getElementById('btn-restart');
+const btnQuit = document.getElementById('btn-quit');
+
+function hideScreens() {
+  screenEl.style.display = 'none';
+}
+
+function showScreen(kind) {
+  screenEl.style.display = 'flex';
+  btnStart.style.display = 'none';
+  btnContinue.style.display = 'none';
+  btnResume.style.display = 'none';
+  btnRestart.style.display = 'none';
+  btnQuit.style.display = 'none';
+  if (kind === 'title') {
+    screenTitle.textContent = 'SUNSET BAY';
+    screenText.innerHTML =
+      'A sun-soaked open-world crime story. Run jobs for Marisol, steal fast cars, and stay one step ahead of the Sunset Bay PD.<br><br>' +
+      '<b>WASD</b> move / drive &nbsp;·&nbsp; <b>Mouse</b> camera &nbsp;·&nbsp; <b>Shift</b> run &nbsp;·&nbsp; <b>E</b> enter / exit car &nbsp;·&nbsp; <b>F / Click</b> punch &nbsp;·&nbsp; <b>Space</b> brake &nbsp;·&nbsp; <b>Esc</b> pause';
+    btnStart.style.display = 'inline-block';
+    const save = loadSave();
+    if (save && save.missionIndex > 0) {
+      btnContinue.style.display = 'inline-block';
+      btnContinue.textContent = 'Continue — ' + save.money + ' · Mission ' + (save.missionIndex + 1) + '/3';
     }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
+  } else if (kind === 'paused') {
+    screenTitle.textContent = 'PAUSED';
+    screenText.textContent = 'Take a breath. The city waits.';
+    btnResume.style.display = 'inline-block';
+    btnQuit.style.display = 'inline-block';
+  } else if (kind === 'over') {
+    screenTitle.textContent = game.overReason === 'busted' ? 'BUSTED!' : 'WASTED';
+    screenText.textContent =
+      game.overReason === 'busted'
+        ? 'The Sunset Bay PD caught you. Your money and mission progress were saved.'
+        : 'You got taken out on the streets of Sunset Bay. Your money and mission progress were saved.';
+    btnRestart.style.display = 'inline-block';
+    btnQuit.style.display = 'inline-block';
+  }
+}
+
+btnStart.addEventListener('click', () => startPlaying(true));
+btnContinue.addEventListener('click', () => startPlaying(false));
+btnResume.addEventListener('click', resumeGame);
+btnRestart.addEventListener('click', () => startPlaying(false));
+btnQuit.addEventListener('click', () => {
+  game.mode = 'title';
+  saveGame();
+  showScreen('title');
+});
+
+function resumeGame() {
+  game.mode = 'playing';
+  hideScreens();
+  input.requestLock();
+}
+
+document.addEventListener('pointerlockchange', () => {
+  if (!input.isLocked() && game.mode === 'playing' && !shot) {
+    game.mode = 'paused';
+    showScreen('paused');
+  }
+});
+
+canvas.addEventListener('click', () => {
+  if (game.mode === 'playing' && !input.isLocked() && !shot) input.requestLock();
+});
+
+// --- Third-person camera -------------------------------------------------------
+function updateCamera(dt) {
+  const target = game.inCar
+    ? new THREE.Vector3(game.inCar.state.x, 1.4, game.inCar.state.z)
+    : new THREE.Vector3(player.state.pos.x, 1.6, player.state.pos.z);
+  if (game.inCar && !shot) {
+    // Ease the camera behind the car while driving (skipped for staged
+    // shots, where the camera angle is chosen for the picture).
+    const behind = game.inCar.state.heading + Math.PI;
+    let diff = behind - game.cameraYaw;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    game.cameraYaw += diff * Math.min(1, dt * 1.6);
+  }
+  const dist = game.inCar ? 10.5 : game.cameraDist;
+  const height = 2.2 + Math.sin(game.cameraPitch) * dist;
+  const flat = Math.cos(game.cameraPitch) * dist;
+  camera.position.set(
+    target.x + Math.sin(game.cameraYaw) * flat,
+    target.y + height,
+    target.z + Math.cos(game.cameraYaw) * flat,
+  );
+  camera.lookAt(target.x, target.y + 0.4, target.z);
+}
+
+// --- One simulation step --------------------------------------------------------
+function step(dt) {
+  game.frames += 1;
+  game.clockMinutes = (game.clockMinutes + dt * 6) % 1440; // 6 game-minutes per second
+  if (game.crimeCooldown > 0) game.crimeCooldown -= dt;
+  if (game.ramCooldown > 0) game.ramCooldown -= dt;
+
+  const actions = input.takeActions();
+  const mouse = input.takeMouseDelta();
+  game.cameraYaw -= mouse.dx * 0.0028;
+  game.cameraPitch = clamp(game.cameraPitch + mouse.dy * 0.0022, 0.05, 1.0);
+
+  // Pause toggle (Esc key, or pointer-lock loss handled above).
+  if (actions.has(ACTION_PAUSE) && !shot) {
+    game.mode = 'paused';
+    input.releaseLock();
+    showScreen('paused');
+    return;
   }
 
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
-    }
-  }
-
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
-      return;
-    }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
+  // Enter / exit car.
+  if (actions.has(ACTION_ENTER_CAR)) {
+    if (game.inCar) {
+      exitCar();
     } else {
-      accumulator = 0;
+      const car = nearestCar(4);
+      if (car) enterCar(car);
     }
-    renderer.draw(world.state, screen, best);
   }
 
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
+  // Punch on foot.
+  if (actions.has(ACTION_PUNCH) && !game.inCar) {
+    if (player.punch()) {
+      audio.punch();
+      const reach = {
+        x: player.state.pos.x + Math.sin(player.state.heading) * 1.6,
+        z: player.state.pos.z + Math.cos(player.state.heading) * 1.6,
+      };
+      if (pedestrians.hitAt(reach.x, reach.z, 1.6)) police.addCrime(1);
     }
+  }
+
+  // Movement.
+  if (game.inCar) {
+    const hitWall = game.inCar.drive(dt, input, world.colliders);
+    if (hitWall && game.crimeCooldown <= 0) {
+      audio.crash();
+      game.crimeCooldown = 1;
+    }
+    // Running over pedestrians / ramming traffic while driving is a crime.
+    if (pedestrians.hitAt(game.inCar.state.x, game.inCar.state.z, 2.4)) {
+      police.addCrime(1);
+      game.inCar.state.speed *= 0.6;
+      audio.crash();
+    }
+    for (const other of traffic.cars) {
+      if (flatDistance(game.inCar.state, other.state) < 3.6) {
+        if (game.crimeCooldown <= 0) {
+          police.addCrime(1);
+          audio.crash();
+          game.crimeCooldown = 2;
+        }
+        game.inCar.state.speed *= 0.5;
+        other.state.speed = 0;
+      }
+    }
+    audio.setEngine(Math.abs(game.inCar.state.speed) / 40, true);
+  } else {
+    player.update(dt, input, game.cameraYaw, world.colliders);
+    audio.setEngine(0, false);
+  }
+
+  // World life.
+  world.update(dt);
+  traffic.update(dt, game.inCar);
+  pedestrians.update(dt);
+
+  // Police chase. The target is the car when driving, the player on foot.
+  // In the cover / on-foot staged shots the cruisers hold still so they
+  // stay in frame (and cannot bust the player mid-screenshot).
+  const policeDt = shot && (shot === 'cover' || shot === 'onfoot') ? 0 : dt;
+  const target = game.inCar
+    ? { x: game.inCar.state.x, z: game.inCar.state.z, inCar: true }
+    : { x: player.state.pos.x, z: player.state.pos.z, inCar: false };
+  police.update(
+    policeDt,
+    target,
+    world.colliders,
+    () => gameOver('busted'),
+    () => {
+      if (game.ramCooldown <= 0) {
+        player.setHealth(player.state.health - 9);
+        audio.crash();
+        game.ramCooldown = 1;
+        if (player.state.health <= 0) gameOver('wasted');
+      }
+    },
+  );
+
+  // Slow health regen while clean.
+  if (police.wanted === 0 && player.state.health < PLAYER.maxHealth) {
+    player.setHealth(player.state.health + 3 * dt);
+  }
+
+  // Missions.
+  if (missions.state.index !== game.prevMissionIndex) {
+    game.prevMissionIndex = missions.state.index;
+    if (missions.state.index === 2) police.setWanted(3);
+  }
+  missions.update(dt, {
+    playerPos: () =>
+      game.inCar ? { x: game.inCar.state.x, z: game.inCar.state.z } : player.state.pos,
+    inSportsCar: () => game.inCar === sportsCar,
+    onPickup: () => audio.pickup(),
+    onReward: (reward) => {
+      game.money += reward;
+      audio.missionComplete();
+      saveGame();
+    },
   });
 
-  announce('Block Dodger. Press Space or click to start.');
-  requestAnimationFrame(frame);
+  // HUD.
+  const marker = missions.markerPos ? missions.markerPos() : null;
+  hud.update({
+    health: player.state.health,
+    money: game.money,
+    wanted: police.wanted,
+    clock: formatClock(game.clockMinutes),
+    objective: missions.objective,
+    banner: missions.banner,
+    speedKmh: game.inCar ? Math.abs(game.inCar.state.speed) * 3.6 : null,
+    marker,
+    player: { x: player.state.pos.x, z: player.state.pos.z, heading: player.state.heading },
+    traffic: traffic.cars.map((c) => ({ x: c.state.x, z: c.state.z })),
+    police: police.cruisers.map((c) => ({ x: c.state.x, z: c.state.z })),
+  });
+  audio.updateSiren(dt, police.wanted > 0);
+
+  updateCamera(dt);
 }
 
-if (shot) runShot(shot);
-else runGame();
+// --- Screenshot staging ---------------------------------------------------------
+function stageShot(name) {
+  game.mode = 'playing';
+  hideScreens();
+  hud.show();
+  game.money = 1250;
+  game.clockMinutes = 14 * 60 + 32;
+  player.reset(world.places.spawn.x, world.places.spawn.z);
+  player.group.visible = true;
+  missions.startMission(0);
+  game.prevMissionIndex = 0;
+
+  if (name === 'cover') {
+    // Player beside the red sports car by the plaza, one star, a cruiser near.
+    player.reset(18, -6);
+    player.state.heading = -0.6;
+    sportsCar.place(13, -13, Math.PI / 2);
+    game.cameraYaw = 2.4;
+    game.cameraPitch = 0.3;
+    game.cameraDist = 13;
+    police.setWanted(1);
+  } else if (name === 'onfoot') {
+    // Walking the pier, package marker glowing ahead.
+    player.reset(84, 212);
+    player.state.heading = 0;
+    game.cameraYaw = Math.PI;
+    game.cameraPitch = 0.28;
+  } else if (name === 'chase') {
+    // Driving the sports car down Ocean Drive with a 3-star tail.
+    missions.startMission(2);
+    game.prevMissionIndex = 2;
+    sportsCar.place(24.8, -120, 0); // southbound lane of Ocean Drive
+    game.inCar = sportsCar;
+    sportsCar.state.parked = false;
+    sportsCar.state.speed = 24;
+    player.group.visible = false;
+    police.setWanted(3);
+    // Three-quarter rear view so the tail is in frame behind the car.
+    game.cameraYaw = Math.PI - 0.55;
+    game.cameraPitch = 0.3;
+  } else if (name === 'drive') {
+    // Cruising through downtown traffic, clean record.
+    const car = parkedCars[0];
+    car.place(-31.2, 60, 0); // southbound lane of the avenue
+    car.state.speed = 16;
+    game.inCar = car;
+    car.state.parked = false;
+    player.group.visible = false;
+    game.cameraYaw = Math.PI;
+    game.cameraPitch = 0.3;
+    // Two traffic cars ahead on the same road so the street feels alive.
+    traffic.stageCar(0, -28, 110, true, 1);
+    traffic.stageCar(1, -28, 150, true, -1);
+    traffic.stageCar(2, 28, 90, true, 1);
+  }
+  game.shotStaged = true;
+}
+
+// --- Main loop --------------------------------------------------------------------
+const clock = new THREE.Clock();
+let shotReadyAt = -1;
+
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  if (game.mode === 'playing') {
+    step(dt);
+    if (shot && game.shotStaged) {
+      // Let traffic settle, then place the police tail for the shot.
+      if (game.frames === 40 && (shot === 'chase' || shot === 'cover')) {
+        const anchor = game.inCar ? game.inCar.state : player.state.pos;
+        police.cruisers.forEach((cruiser, i) => {
+          if (shot === 'cover') {
+            // Down the road south of the player, in frame, facing the camera.
+            cruiser.place(anchor.x - 8 - i * 6, anchor.z + 34 + i * 4, Math.PI);
+          } else {
+            // Behind-left of the speeding car, closing in.
+            cruiser.place(anchor.x - 10 - i * 12, anchor.z - 18 - i * 10, 0);
+          }
+        });
+      }
+      if (shot === 'chase' && game.frames >= 40) {
+        // Keep the chase alive for the picture: the sports car holds speed
+        // and the cruisers stay in the visible south-west quadrant — one
+        // cutting in ahead, one alongside, one trailing.
+        sportsCar.state.speed = 24;
+        const spots = [
+          { dx: -12, dz: 20, heading: Math.PI },
+          { dx: -14, dz: -4, heading: 0 },
+          { dx: -16, dz: 8, heading: 0 },
+        ];
+        police.cruisers.forEach((cruiser, i) => {
+          const spot = spots[i % spots.length];
+          cruiser.place(
+            sportsCar.state.x + spot.dx,
+            sportsCar.state.z + spot.dz,
+            spot.heading,
+          );
+        });
+      }
+      if (game.frames === 120 && shotReadyAt < 0) {
+        shotReadyAt = game.frames;
+        window.__shotReady = true;
+      }
+    }
+  } else if (game.mode === 'title') {
+    // Slow orbit around the plaza behind the title screen.
+    const t = performance.now() / 1000;
+    camera.position.set(Math.sin(t * 0.05) * 90, 42, Math.cos(t * 0.05) * 90);
+    camera.lookAt(0, 8, 0);
+    world.update(dt);
+    traffic.update(dt, null);
+    pedestrians.update(dt);
+  }
+
+  renderer.render(scene, camera);
+  if (game.frames === 5) window.__gameReady = true;
+}
+
+if (shot) {
+  stageShot(shot);
+} else {
+  showScreen('title');
+  hud.hide();
+}
+frame();
