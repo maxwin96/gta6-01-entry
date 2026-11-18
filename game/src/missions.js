@@ -1,14 +1,14 @@
-// Missions: three chained jobs with a glowing objective marker, a HUD
-// objective line, completion rewards and a short "mission passed" banner.
-// The story is original: a newcomer in Sunset Bay runs errands for the
-// harbour fixer "Marisol", steals a car for the chop shop, then has to
-// shake a police tail.
+// Missions: four chained jobs with a glowing objective marker, a HUD
+// objective line, completion rewards and a "mission passed" banner.
+// A newcomer in Sunset Bay runs errands for the harbour fixer "Marisol",
+// steals a car for the chop shop, shakes a police tail — and now caps it
+// off with a timed sprint down Ocean Drive to the pier.
 
 import * as THREE from 'three';
-import { MISSIONS } from './config.js';
+import { MISSIONS, SPRINT } from './config.js';
 import { flatDistance } from './utils.js';
 
-function makeMarker(color) {
+function buildMarker(color) {
   const group = new THREE.Group();
   const ring = new THREE.Mesh(
     new THREE.TorusGeometry(2.2, 0.18, 10, 32),
@@ -33,23 +33,34 @@ function makeMarker(color) {
   return { group, dot };
 }
 
+// The sprint route: east Ocean Drive, mid Ocean Drive, then the pier.
+function sprintRoute(places) {
+  return [
+    { x: 140, z: 196, label: 'Checkpoint 1/3 — east Ocean Drive' },
+    { x: 28, z: 196, label: 'Checkpoint 2/3 — mid Ocean Drive' },
+    { x: places.pier.x, z: places.pier.z, label: 'Final checkpoint — the pier' },
+  ];
+}
+
 export function createMissions(scene, places) {
   const markers = {
-    gold: makeMarker(0xffc93a),
-    red: makeMarker(0xff4444),
+    gold: buildMarker(0xffc93a),
+    red: buildMarker(0xff4444),
   };
   scene.add(markers.gold.group);
   scene.add(markers.red.group);
 
   const state = {
-    index: 0, // which mission is active (0..2); 3 = all done
+    index: 0, // active mission (0..3); 4 = all done
     stage: 0, // step inside the current mission
-    timer: 0, // mission 3 countdown
+    timer: 0, // mission 3 and sprint countdowns
     hasPackage: false,
     banner: null, // { text, sub, until } shown by the HUD
     objective: '',
-    marker: null, // { x, z } of the currently visible objective marker
+    marker: null, // { x, z } of the visible objective marker
+    checkpoint: 0, // sprint checkpoint reached so far
   };
+  const route = sprintRoute(places);
 
   function setObjective(text) {
     state.objective = text;
@@ -83,6 +94,7 @@ export function createMissions(scene, places) {
     state.stage = 0;
     state.timer = 0;
     state.hasPackage = false;
+    state.checkpoint = 0;
     hideMarkers();
     if (index === 0) {
       placeMarker('gold', places.pier.x, places.pier.z);
@@ -93,6 +105,10 @@ export function createMissions(scene, places) {
     } else if (index === 2) {
       setObjective('Survive the police chase — 60 seconds left');
       state.timer = 60;
+    } else if (index === 3) {
+      state.timer = SPRINT.timeLimit;
+      placeMarker('gold', route[0].x, route[0].z);
+      setObjective('Sunset Sprint — ' + route[0].label + ' — ' + SPRINT.timeLimit + 's');
     } else {
       setObjective('All jobs done — Sunset Bay is yours, kid.');
     }
@@ -155,6 +171,7 @@ export function createMissions(scene, places) {
           }
         } else if (flatDistance(pos, places.hotel) < 4) {
           hooks.onReward(completeMission());
+          if (hooks.onFireworks) hooks.onFireworks();
         }
       } else if (mission.id === 'hotwheels') {
         if (state.stage === 0 && hooks.inSportsCar()) {
@@ -164,12 +181,36 @@ export function createMissions(scene, places) {
           hooks.onPickup();
         } else if (state.stage === 1 && hooks.inSportsCar() && flatDistance(pos, places.garage) < 6) {
           hooks.onReward(completeMission());
+          if (hooks.onFireworks) hooks.onFireworks();
         }
       } else if (mission.id === 'heat') {
         state.timer -= dt;
         setObjective('Survive the police chase — ' + Math.max(0, Math.ceil(state.timer)) + ' seconds left');
         if (state.timer <= 0) {
           hooks.onReward(completeMission());
+          if (hooks.onFireworks) hooks.onFireworks();
+        }
+      } else if (mission.id === 'sprint') {
+        state.timer -= dt;
+        const left = Math.max(0, Math.ceil(state.timer));
+        const cp = route[state.checkpoint];
+        setObjective('Sunset Sprint — ' + cp.label + ' — ' + left + 's left');
+        if (flatDistance(pos, cp) < SPRINT.checkpointRadius) {
+          state.checkpoint += 1;
+          hooks.onPickup();
+          if (state.checkpoint >= route.length) {
+            hooks.onReward(completeMission());
+            if (hooks.onFireworks) hooks.onFireworks();
+          } else {
+            const next = route[state.checkpoint];
+            placeMarker('gold', next.x, next.z);
+            showBanner('CHECKPOINT ' + state.checkpoint + '/3', next.label, 2.5);
+          }
+        } else if (state.timer <= 0) {
+          // Out of time: the sprint restarts from its first checkpoint.
+          showBanner('OUT OF TIME', 'The sprint restarts — hit the checkpoints faster', 3);
+          startMission(3);
+          if (hooks.onSprintRestart) hooks.onSprintRestart();
         }
       }
     },

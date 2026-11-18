@@ -1,6 +1,8 @@
-// HUD: health bar, money, wanted stars, clock, mission objective, banner,
-// speedometer while driving, and a 2D minimap that draws roads, the player,
-// police, traffic and the mission marker.
+// HUD: health bar, money, pulsing wanted stars, clock, mission panel
+// ("MISSION n/4 — TITLE" plus the objective line), banner, speedometer
+// while driving, and a 2D minimap that draws roads, the coastline and
+// sand, the plaza, the player, police, traffic and a pulsing mission
+// marker.
 
 import { ROAD_LINES } from './world.js';
 import { formatMoney } from './utils.js';
@@ -11,6 +13,7 @@ export function createHud() {
   const moneyEl = document.getElementById('money');
   const starsEl = document.getElementById('stars');
   const clockEl = document.getElementById('clock');
+  const missionEl = document.getElementById('mission-panel');
   const objectiveEl = document.getElementById('objective');
   const bannerEl = document.getElementById('banner');
   const bannerTitle = document.getElementById('banner-title');
@@ -25,11 +28,21 @@ export function createHud() {
     const size = minimap.width;
     const range = 460; // world metres across the map
     const toMap = (x, z) => [((x + range / 2) / range) * size, ((z + range / 2) / range) * size];
-    mapCtx.fillStyle = 'rgba(12, 26, 18, 0.82)';
+    // Land base.
+    mapCtx.fillStyle = 'rgba(16, 34, 24, 0.88)';
     mapCtx.fillRect(0, 0, size, size);
-    // Beach sand strip at the bottom (south, z past the city edge).
-    mapCtx.fillStyle = 'rgba(232, 210, 154, 0.9)';
-    mapCtx.fillRect(0, size * 0.94, size, size * 0.06);
+    // Ocean (south) and the sand strip of the beach.
+    const [, shoreY] = toMap(0, 203);
+    mapCtx.fillStyle = 'rgba(42, 110, 168, 0.95)';
+    mapCtx.fillRect(0, shoreY + size * 0.05, size, size);
+    mapCtx.fillStyle = 'rgba(232, 210, 154, 0.95)';
+    mapCtx.fillRect(0, shoreY, size, size * 0.05);
+    // Central plaza as a pale circle.
+    const [px0, pz0] = toMap(0, 0);
+    mapCtx.fillStyle = 'rgba(159, 200, 232, 0.8)';
+    mapCtx.beginPath();
+    mapCtx.arc(px0, pz0, 7, 0, Math.PI * 2);
+    mapCtx.fill();
     // Roads.
     mapCtx.strokeStyle = 'rgba(220, 220, 210, 0.85)';
     mapCtx.lineWidth = 4;
@@ -45,15 +58,20 @@ export function createHud() {
       mapCtx.lineTo(size, bz);
       mapCtx.stroke();
     }
-    // Mission marker (gold diamond).
+    // Mission marker: a gold diamond that breathes.
     if (view.marker) {
       const [mx, mz] = toMap(view.marker.x, view.marker.z);
+      const pulse = 6 + Math.sin(performance.now() / 220) * 2.5;
+      mapCtx.fillStyle = 'rgba(255, 201, 58, 0.35)';
+      mapCtx.beginPath();
+      mapCtx.arc(mx, mz, pulse + 6, 0, Math.PI * 2);
+      mapCtx.fill();
       mapCtx.fillStyle = '#ffc93a';
       mapCtx.beginPath();
-      mapCtx.moveTo(mx, mz - 7);
-      mapCtx.lineTo(mx + 7, mz);
-      mapCtx.lineTo(mx, mz + 7);
-      mapCtx.lineTo(mx - 7, mz);
+      mapCtx.moveTo(mx, mz - pulse);
+      mapCtx.lineTo(mx + pulse, mz);
+      mapCtx.lineTo(mx, mz + pulse);
+      mapCtx.lineTo(mx - pulse, mz);
       mapCtx.fill();
     }
     // Traffic (grey dots).
@@ -70,6 +88,7 @@ export function createHud() {
       mapCtx.arc(cx, cz, 4, 0, Math.PI * 2);
       mapCtx.fill();
     }
+
     // Player (white triangle pointing along the heading).
     const [px, pz] = toMap(view.player.x, view.player.z);
     mapCtx.save();
@@ -112,8 +131,21 @@ export function createHud() {
       moneyEl.textContent = formatMoney(view.money);
       starsEl.textContent = '★'.repeat(view.wanted) + '☆'.repeat(5 - view.wanted);
       starsEl.style.color = view.wanted > 0 ? '#ffd23a' : 'rgba(255,255,255,0.45)';
+      // Wanted stars throb while the heat is on.
+      if (view.wanted > 0) {
+        const beat = 1 + Math.sin(performance.now() / 160) * 0.14;
+        starsEl.style.transform = 'scale(' + beat.toFixed(3) + ')';
+        starsEl.style.transformOrigin = 'right center';
+      } else {
+        starsEl.style.transform = 'scale(1)';
+      }
       wantedLabel.style.display = view.wanted > 0 ? 'inline' : 'none';
       clockEl.textContent = view.clock;
+      if (missionEl && view.missionTitle) {
+        const total = view.missionTotal || 4;
+        const num = Math.min(view.missionIndex + 1, total);
+        missionEl.textContent = 'MISSION ' + num + '/' + total + ' — ' + view.missionTitle;
+      }
       objectiveEl.textContent = view.objective;
       if (view.banner) {
         bannerTitle.textContent = view.banner.text;

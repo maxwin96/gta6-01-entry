@@ -1,40 +1,37 @@
-// Sunset Bay — the submission script for the gta6-01 "Make GTA 6" bounty.
-// Node 22, standard library only. The game itself is the static files under
-// game/ (index.html plus ES modules, three.js vendored locally, no network
-// requests at all). This program stages a submission: it copies game/ and
-// screenshots/ next to this file into the output directory and writes
-// dossier.json there, the summary the judge reads, using the vendored
-// make.fun library. The destination defaults to /output (the grader's
-// folder); outside that container MAKEFUN_OUTPUT_DIR can point elsewhere:
+// Sunset Bay — packs the gta6-01 entry for the judge.
+// Plain Node, no dependencies: this script gathers the static game folder
+// and the screenshots next to it, drops them into the grading folder,
+// and asks the vendored make.fun helper to write dossier.json there.
+// The grader folder defaults to /output; set MAKEFUN_OUTPUT_DIR to aim
+// somewhere else while testing locally, e.g.
 //
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 //
-// Run it twice and the bytes come out identical — the copy and the dossier
-// are deterministic, so a re-run is a clean check, not a new submission.
+// Running it twice gives byte-identical output, so a second run is a
+// free sanity check rather than a new submission.
 
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-const repoRoot = fileURLToPath(new URL('.', import.meta.url));
-const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const here = fileURLToPath(new URL('.', import.meta.url));
+const dest = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-mkdirSync(outputDir, { recursive: true });
-cpSync(join(repoRoot, 'game'), join(outputDir, 'game'), { recursive: true });
-mkdirSync(join(outputDir, 'screenshots'), { recursive: true });
-if (existsSync(join(repoRoot, 'screenshots'))) {
-  cpSync(join(repoRoot, 'screenshots'), join(outputDir, 'screenshots'), { recursive: true });
+mkdirSync(dest, { recursive: true });
+cpSync(join(here, 'game'), join(dest, 'game'), { recursive: true });
+mkdirSync(join(dest, 'screenshots'), { recursive: true });
+if (existsSync(join(here, 'screenshots'))) {
+  cpSync(join(here, 'screenshots'), join(dest, 'screenshots'), { recursive: true });
 }
 
-// Caps the scorer enforces (from its reference/gate.json): text_max_bytes is
-// the only one that shapes the dossier's bytes; the rest reject an entry the
-// scorer would reject anyway — more than 4 screenshots, any screenshot over
-// 256 KiB, more than 993 files under game/, game/ over 48 MiB in total, or
-// any path under game/ longer than 1000 bytes.
+// These caps mirror the scorer's own gates, so anything this script
+// accepts is something the scorer would accept too: at most 4 shots,
+// none over 256 KiB, at most 993 files under game/, game/ under 48 MiB,
+// and no game path longer than 1000 bytes.
 writeFileSync(
-  join(outputDir, 'dossier.json'),
-  buildDossier(outputDir, {
+  join(dest, 'dossier.json'),
+  buildDossier(dest, {
     text_max_bytes: 163840,
     screenshots: { max: 4, max_bytes: 262144 },
     game_max_files: 993,

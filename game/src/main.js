@@ -1,12 +1,15 @@
 // Sunset Bay — boot, game loop and state machine.
-// Title -> playing -> paused / busted / wasted, with a save in localStorage.
-// ?shot=cover|onfoot|chase|drive stages a scene for screenshots instead of
-// showing the title screen, then sets window.__shotReady once settled.
+// Title -> playing -> paused / busted / wasted, with a save in
+// localStorage. ?shot=cover|onfoot|chase|drive stages a scene for
+// screenshots instead of the title screen, then sets window.__shotReady
+// once it has settled.
 
 import * as THREE from 'three';
-import { CITY, PLAYER, SAVE_KEY, START_MONEY, WANTED } from './config.js';
+import { CITY, PLAYER, SAVE_KEY, START_MONEY, WANTED, MISSIONS, SPRINT } from './config.js';
 import { createRng, clamp, flatDistance, formatClock } from './utils.js';
 import { createWorld } from './world.js';
+import { createSunsetLighting } from './lighting.js';
+import { createEffects } from './effects.js';
 import { createPlayer } from './player.js';
 import { createCar, spawnParkedCars } from './vehicles.js';
 import { createTraffic, createPedestrians } from './traffic.js';
@@ -22,13 +25,15 @@ const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
 const seed = Number.isInteger(seedParam) ? seedParam : 1337;
 const rng = createRng(seed);
 
-// --- Renderer / scene -------------------------------------------------------
+// --- Renderer / scene ------------------------------------------------------
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.3;
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 1200);
@@ -39,8 +44,10 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// --- World and actors --------------------------------------------------------
+// --- World and actors -------------------------------------------------------
 const world = createWorld(scene, seed);
+const sunset = createSunsetLighting(scene);
+const fx = createEffects(scene);
 const player = createPlayer(scene);
 const audio = createAudio();
 const input = createInput(canvas);
@@ -71,7 +78,7 @@ const sportsCar = createCar(scene, {
 });
 const enterableCars = [...parkedCars, sportsCar];
 
-// --- Game state ---------------------------------------------------------------
+// --- Game state --------------------------------------------------------------
 const game = {
   mode: 'title', // title | playing | paused | over
   money: START_MONEY,
@@ -87,6 +94,7 @@ const game = {
   prevMissionIndex: 0,
   frames: 0,
   shotStaged: false,
+  elapsed: 0,
 };
 
 function saveGame() {
@@ -155,6 +163,14 @@ function gameOver(reason) {
   showScreen('over');
 }
 
+// Wanted level that belongs to a mission: the heat job is 3 stars, the
+// sprint runs hot at 2, everything else starts clean.
+function wantedForMission(index) {
+  if (index === 2) return 3;
+  if (index === 3) return SPRINT.wanted;
+  return 0;
+}
+
 function startPlaying(fresh) {
   const save = fresh ? null : loadSave();
   game.money = save ? save.money : START_MONEY;
@@ -168,7 +184,7 @@ function startPlaying(fresh) {
   player.reset(world.places.spawn.x, world.places.spawn.z);
   player.group.visible = true;
   missions.startMission(game.missionIndex);
-  if (game.missionIndex === 2) police.setWanted(3);
+  police.setWanted(wantedForMission(game.missionIndex));
   game.cameraYaw = Math.PI;
   game.cameraPitch = 0.34;
   game.mode = 'playing';
@@ -179,7 +195,7 @@ function startPlaying(fresh) {
   input.requestLock();
 }
 
-// --- Screens (title / pause / game over) --------------------------------------
+// --- Screens (title / pause / game over) -------------------------------------
 const screenEl = document.getElementById('screen');
 const screenTitle = document.getElementById('screen-title');
 const screenText = document.getElementById('screen-text');
@@ -203,13 +219,13 @@ function showScreen(kind) {
   if (kind === 'title') {
     screenTitle.textContent = 'SUNSET BAY';
     screenText.innerHTML =
-      'A sun-soaked open-world crime story. Run jobs for Marisol, steal fast cars, and stay one step ahead of the Sunset Bay PD.<br><br>' +
+      'A sun-soaked open-world crime story. Run jobs for Marisol, steal fast cars, outrun the Sunset Bay PD — and beat the clock in the Sunset Sprint.<br><br>' +
       '<b>WASD</b> move / drive &nbsp;·&nbsp; <b>Mouse</b> camera &nbsp;·&nbsp; <b>Shift</b> run &nbsp;·&nbsp; <b>E</b> enter / exit car &nbsp;·&nbsp; <b>F / Click</b> punch &nbsp;·&nbsp; <b>Space</b> brake &nbsp;·&nbsp; <b>Esc</b> pause';
     btnStart.style.display = 'inline-block';
     const save = loadSave();
     if (save && save.missionIndex > 0) {
       btnContinue.style.display = 'inline-block';
-      btnContinue.textContent = 'Continue — ' + save.money + ' · Mission ' + (save.missionIndex + 1) + '/3';
+      btnContinue.textContent = 'Continue — ' + save.money + ' · Mission ' + (save.missionIndex + 1) + '/' + MISSIONS.length;
     }
   } else if (kind === 'paused') {
     screenTitle.textContent = 'PAUSED';
@@ -254,7 +270,7 @@ canvas.addEventListener('click', () => {
   if (game.mode === 'playing' && !input.isLocked() && !shot) input.requestLock();
 });
 
-// --- Third-person camera -------------------------------------------------------
+// --- Third-person camera ------------------------------------------------------
 function updateCamera(dt) {
   const target = game.inCar
     ? new THREE.Vector3(game.inCar.state.x, 1.4, game.inCar.state.z)
@@ -279,9 +295,10 @@ function updateCamera(dt) {
   camera.lookAt(target.x, target.y + 0.4, target.z);
 }
 
-// --- One simulation step --------------------------------------------------------
+// --- One simulation step -------------------------------------------------------
 function step(dt) {
   game.frames += 1;
+  game.elapsed += dt;
   game.clockMinutes = (game.clockMinutes + dt * 6) % 1440; // 6 game-minutes per second
   if (game.crimeCooldown > 0) game.crimeCooldown -= dt;
   if (game.ramCooldown > 0) game.ramCooldown -= dt;
@@ -323,29 +340,49 @@ function step(dt) {
 
   // Movement.
   if (game.inCar) {
-    const hitWall = game.inCar.drive(dt, input, world.colliders);
-    if (hitWall && game.crimeCooldown <= 0) {
-      audio.crash();
-      game.crimeCooldown = 1;
+    const car = game.inCar;
+    const speedBefore = Math.abs(car.state.speed);
+    const hitWall = car.drive(dt, input, world.colliders);
+    if (hitWall) {
+      fx.sparks(car.state.x, 0.8, car.state.z);
+      if (speedBefore > 16) fx.explode(car.state.x, 0.8, car.state.z);
+      if (game.crimeCooldown <= 0) {
+        audio.crash();
+        game.crimeCooldown = 1;
+      }
+    }
+    // Exhaust puffs while rolling, skid marks on hard turns.
+    if (Math.abs(car.state.speed) > 4 && game.frames % 5 === 0) {
+      fx.exhaust(car.state.x, 0, car.state.z, car.state.heading);
+    }
+    if (Math.abs(car.state.steer) > 0.42 && Math.abs(car.state.speed) > 12 && game.frames % 4 === 0) {
+      const back = -1.4;
+      fx.skidMark(
+        car.state.x + Math.sin(car.state.heading) * back,
+        car.state.z + Math.cos(car.state.heading) * back,
+        car.state.heading,
+      );
     }
     // Running over pedestrians / ramming traffic while driving is a crime.
-    if (pedestrians.hitAt(game.inCar.state.x, game.inCar.state.z, 2.4)) {
+    if (pedestrians.hitAt(car.state.x, car.state.z, 2.4)) {
       police.addCrime(1);
-      game.inCar.state.speed *= 0.6;
+      car.state.speed *= 0.6;
       audio.crash();
+      fx.sparks(car.state.x, 0.8, car.state.z);
     }
     for (const other of traffic.cars) {
-      if (flatDistance(game.inCar.state, other.state) < 3.6) {
+      if (flatDistance(car.state, other.state) < 3.6) {
         if (game.crimeCooldown <= 0) {
           police.addCrime(1);
           audio.crash();
           game.crimeCooldown = 2;
         }
-        game.inCar.state.speed *= 0.5;
+        fx.sparks(car.state.x, 0.8, car.state.z);
+        car.state.speed *= 0.5;
         other.state.speed = 0;
       }
     }
-    audio.setEngine(Math.abs(game.inCar.state.speed) / 40, true);
+    audio.setEngine(Math.abs(car.state.speed) / 40, true);
   } else {
     player.update(dt, input, game.cameraYaw, world.colliders);
     audio.setEngine(0, false);
@@ -353,6 +390,8 @@ function step(dt) {
 
   // World life.
   world.update(dt);
+  sunset.update(dt, game.elapsed);
+  fx.update(dt);
   traffic.update(dt, game.inCar);
   pedestrians.update(dt);
 
@@ -386,11 +425,12 @@ function step(dt) {
   // Missions.
   if (missions.state.index !== game.prevMissionIndex) {
     game.prevMissionIndex = missions.state.index;
-    if (missions.state.index === 2) police.setWanted(3);
+    police.setWanted(wantedForMission(missions.state.index));
   }
+  const here = () =>
+    game.inCar ? { x: game.inCar.state.x, z: game.inCar.state.z } : player.state.pos;
   missions.update(dt, {
-    playerPos: () =>
-      game.inCar ? { x: game.inCar.state.x, z: game.inCar.state.z } : player.state.pos,
+    playerPos: here,
     inSportsCar: () => game.inCar === sportsCar,
     onPickup: () => audio.pickup(),
     onReward: (reward) => {
@@ -398,10 +438,16 @@ function step(dt) {
       audio.missionComplete();
       saveGame();
     },
+    onFireworks: () => {
+      const p = here();
+      fx.fireworks(p.x, p.z);
+    },
+    onSprintRestart: () => police.setWanted(SPRINT.wanted),
   });
 
   // HUD.
   const marker = missions.markerPos ? missions.markerPos() : null;
+  const current = missions.currentMission();
   hud.update({
     health: player.state.health,
     money: game.money,
@@ -411,6 +457,9 @@ function step(dt) {
     banner: missions.banner,
     speedKmh: game.inCar ? Math.abs(game.inCar.state.speed) * 3.6 : null,
     marker,
+    missionIndex: missions.state.index,
+    missionTotal: MISSIONS.length,
+    missionTitle: current ? current.title : 'All Done',
     player: { x: player.state.pos.x, z: player.state.pos.z, heading: player.state.heading },
     traffic: traffic.cars.map((c) => ({ x: c.state.x, z: c.state.z })),
     police: police.cruisers.map((c) => ({ x: c.state.x, z: c.state.z })),
@@ -420,7 +469,7 @@ function step(dt) {
   updateCamera(dt);
 }
 
-// --- Screenshot staging ---------------------------------------------------------
+// --- Screenshot staging --------------------------------------------------------
 function stageShot(name) {
   game.mode = 'playing';
   hideScreens();
@@ -478,7 +527,7 @@ function stageShot(name) {
   game.shotStaged = true;
 }
 
-// --- Main loop --------------------------------------------------------------------
+// --- Main loop -------------------------------------------------------------------
 const clock = new THREE.Clock();
 let shotReadyAt = -1;
 
@@ -490,7 +539,7 @@ function frame() {
     step(dt);
     if (shot && game.shotStaged) {
       // Let traffic settle, then place the police tail for the shot.
-      if (game.frames === 40 && (shot === 'chase' || shot === 'cover')) {
+      if (game.frames === 25 && (shot === 'chase' || shot === 'cover')) {
         const anchor = game.inCar ? game.inCar.state : player.state.pos;
         police.cruisers.forEach((cruiser, i) => {
           if (shot === 'cover') {
@@ -502,15 +551,15 @@ function frame() {
           }
         });
       }
-      if (shot === 'chase' && game.frames >= 40) {
+      if (shot === 'chase' && game.frames >= 25) {
         // Keep the chase alive for the picture: the sports car holds speed
         // and the cruisers stay in the visible south-west quadrant — one
         // cutting in ahead, one alongside, one trailing.
         sportsCar.state.speed = 24;
         const spots = [
-          { dx: -12, dz: 20, heading: Math.PI },
-          { dx: -14, dz: -4, heading: 0 },
-          { dx: -16, dz: 8, heading: 0 },
+          { dx: -7, dz: 16, heading: Math.PI },
+          { dx: 7, dz: 10, heading: 0 },
+          { dx: -6, dz: -12, heading: 0 },
         ];
         police.cruisers.forEach((cruiser, i) => {
           const spot = spots[i % spots.length];
@@ -521,7 +570,7 @@ function frame() {
           );
         });
       }
-      if (game.frames === 120 && shotReadyAt < 0) {
+      if (game.frames === 60 && shotReadyAt < 0) {
         shotReadyAt = game.frames;
         window.__shotReady = true;
       }
@@ -532,6 +581,7 @@ function frame() {
     camera.position.set(Math.sin(t * 0.05) * 90, 42, Math.cos(t * 0.05) * 90);
     camera.lookAt(0, 8, 0);
     world.update(dt);
+    sunset.update(dt, t);
     traffic.update(dt, null);
     pedestrians.update(dt);
   }

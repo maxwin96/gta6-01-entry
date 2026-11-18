@@ -1,69 +1,164 @@
-// Cars: a box-body + cabin + wheels factory, arcade driving physics,
-// and a small pool of parked cars the player can steal. Police cars are
-// built by police.js from the same factory with a paint job.
+// Cars: detailed low-poly bodies — stepped hood and trunk, a slanted
+// windscreen under a proper roof, grille, glowing headlights, red tail
+// lights, mirrors, twin exhausts, a spoiler on sporty cars, hubcapped
+// wheels and a plate at the back — plus arcade driving physics and the
+// parked cars the player can steal. Police cruisers are built from the
+// same factory with a white paint job (see police.js).
 
 import * as THREE from 'three';
 import { CAR } from './config.js';
 import { angleDelta, clamp } from './utils.js';
 import { clampToCity } from './world.js';
 
-const BODY_COLORS = [0xd94f3d, 0x3d7bd9, 0xe8c33a, 0x4fae5f, 0xe8e4da, 0x8a5fc0, 0x2b2f36, 0xd97a2b];
-const WHEEL_GEO = new THREE.CylinderGeometry(0.36, 0.36, 0.26, 12);
-const WHEEL_MAT = new THREE.MeshLambertMaterial({ color: 0x1a1c20 });
+const PAINTS = [0xd91e2e, 0x2a6fd9, 0xe8c33a, 0xf2f0ea, 0x1c1e24, 0x3d7bd9, 0xd97a2b, 0x4fae5f];
+const TYRE_GEO = new THREE.CylinderGeometry(0.36, 0.36, 0.26, 14);
+const TYRE_MAT = new THREE.MeshLambertMaterial({ color: 0x14161a });
+
+function plateTexture() {
+  const c = document.createElement('canvas');
+  c.width = 128;
+  c.height = 32;
+  const g = c.getContext('2d');
+  g.fillStyle = '#f2f0ea';
+  g.fillRect(0, 0, 128, 32);
+  g.fillStyle = '#1a2a6b';
+  g.font = 'bold 20px sans-serif';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText('SB • 90210', 64, 17);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+const PLATE_TEX = plateTexture();
 
 export function buildCarMesh(color, sporty) {
   const group = new THREE.Group();
   const paint = new THREE.MeshLambertMaterial({ color });
-  const glass = new THREE.MeshLambertMaterial({ color: 0x1e2f3f });
-  const length = sporty ? 4.6 : 4.2;
-  const width = sporty ? 1.9 : 1.85;
+  const darkTrim = new THREE.MeshLambertMaterial({ color: 0x22252a });
+  const glassMat = new THREE.MeshLambertMaterial({
+    color: 0x182838,
+    emissive: 0x2a4a66,
+    emissiveIntensity: 0.35,
+  });
+  const len = sporty ? 4.6 : 4.2;
+  const wid = sporty ? 1.95 : 1.85;
+  const half = len / 2;
 
-  const body = new THREE.Mesh(new THREE.BoxGeometry(width, 0.62, length), paint);
+  // Lower body, then a stepped hood and trunk so the silhouette reads.
+  const body = new THREE.Mesh(new THREE.BoxGeometry(wid, 0.55, len), paint);
   body.position.y = 0.55;
   body.castShadow = true;
   group.add(body);
+  const hood = new THREE.Mesh(new THREE.BoxGeometry(wid * 0.92, 0.16, len * 0.22), paint);
+  hood.position.set(0, 0.88, half - len * 0.11);
+  hood.castShadow = true;
+  group.add(hood);
+  const trunk = new THREE.Mesh(new THREE.BoxGeometry(wid * 0.92, 0.14, len * 0.18), paint);
+  trunk.position.set(0, 0.87, -half + len * 0.09);
+  group.add(trunk);
 
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(width * 0.86, 0.55, length * 0.46), glass);
-  cabin.position.set(0, 1.1, sporty ? -0.25 : -0.15);
-  cabin.castShadow = true;
-  group.add(cabin);
+  // Cabin: slanted windscreen, roof, slanted rear glass.
+  const roof = new THREE.Mesh(new THREE.BoxGeometry(wid * 0.84, 0.1, len * 0.26), paint);
+  roof.position.set(0, 1.32, -0.1);
+  roof.castShadow = true;
+  group.add(roof);
+  const screen = new THREE.Mesh(new THREE.BoxGeometry(wid * 0.8, 0.08, 0.75), glassMat);
+  screen.position.set(0, 1.16, half - len * 0.26);
+  screen.rotation.x = 0.55;
+  group.add(screen);
+  const rearGlass = new THREE.Mesh(new THREE.BoxGeometry(wid * 0.8, 0.08, 0.6), glassMat);
+  rearGlass.position.set(0, 1.14, -half + len * 0.26);
+  rearGlass.rotation.x = -0.5;
+  group.add(rearGlass);
+  const sideGlass = new THREE.Mesh(new THREE.BoxGeometry(wid * 0.86, 0.34, len * 0.2), glassMat);
+  sideGlass.position.set(0, 1.08, -0.1);
+  group.add(sideGlass);
 
-  const bumperMat = new THREE.MeshLambertMaterial({ color: 0x22252a });
-  const bumperF = new THREE.Mesh(new THREE.BoxGeometry(width, 0.18, 0.25), bumperMat);
-  bumperF.position.set(0, 0.32, length / 2);
-  group.add(bumperF);
-  const bumperB = bumperF.clone();
-  bumperB.position.z = -length / 2;
-  group.add(bumperB);
-
-  // Headlights.
-  const lightMat = new THREE.MeshLambertMaterial({
-    color: 0xfff2b0,
-    emissive: 0xffe9a0,
-    emissiveIntensity: 0.5,
-  });
-  for (const side of [-1, 1]) {
-    const light = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.14, 0.06), lightMat);
-    light.position.set(side * (width / 2 - 0.3), 0.62, length / 2 + 0.01);
-    group.add(light);
+  // Grille + bumpers.
+  const grille = new THREE.Mesh(new THREE.BoxGeometry(wid * 0.6, 0.16, 0.08), darkTrim);
+  grille.position.set(0, 0.6, half + 0.02);
+  group.add(grille);
+  for (const z of [half, -half]) {
+    const bumper = new THREE.Mesh(new THREE.BoxGeometry(wid, 0.18, 0.24), darkTrim);
+    bumper.position.set(0, 0.32, z);
+    group.add(bumper);
   }
 
+  // Headlights that glow at dusk, red tail lights at the back.
+  const beamMat = new THREE.MeshLambertMaterial({
+    color: 0xfff2b0,
+    emissive: 0xffe9a0,
+    emissiveIntensity: 1.1,
+  });
+  const tailMat = new THREE.MeshLambertMaterial({
+    color: 0xcc2222,
+    emissive: 0xff2222,
+    emissiveIntensity: 0.9,
+  });
+  for (const side of [-1, 1]) {
+    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.15, 0.07), beamMat);
+    lamp.position.set(side * (wid / 2 - 0.32), 0.64, half + 0.02);
+    group.add(lamp);
+    const tail = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.13, 0.07), tailMat);
+    tail.position.set(side * (wid / 2 - 0.32), 0.64, -half - 0.02);
+    group.add(tail);
+    // Wing mirrors.
+    const mirror = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.12, 0.22), darkTrim);
+    mirror.position.set(side * (wid / 2 + 0.06), 1.05, half - len * 0.3);
+    group.add(mirror);
+    // Twin exhaust tips.
+    const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.22, 8), darkTrim);
+    pipe.rotation.x = Math.PI / 2;
+    pipe.position.set(side * 0.5, 0.3, -half - 0.06);
+    group.add(pipe);
+  }
+
+  // Spoiler on sporty cars only.
+  if (sporty) {
+    const wing = new THREE.Mesh(new THREE.BoxGeometry(wid * 0.9, 0.07, 0.5), darkTrim);
+    wing.position.set(0, 1.12, -half + 0.2);
+    wing.castShadow = true;
+    group.add(wing);
+    for (const side of [-1, 1]) {
+      const strut = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.24, 0.1), darkTrim);
+      strut.position.set(side * (wid * 0.36), 0.98, -half + 0.2);
+      group.add(strut);
+    }
+  }
+
+  // Rear plate.
+  const plate = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.62, 0.16),
+    new THREE.MeshBasicMaterial({ map: PLATE_TEX }),
+  );
+  plate.position.set(0, 0.52, -half - 0.14);
+  plate.rotation.y = Math.PI;
+  group.add(plate);
+
+  // Wheels with pale hubcaps.
+  const hubMat = new THREE.MeshLambertMaterial({ color: 0xc8ccd2 });
   const wheels = [];
   for (const [wx, wz] of [
-    [-width / 2, length / 2 - 0.75],
-    [width / 2, length / 2 - 0.75],
-    [-width / 2, -length / 2 + 0.75],
-    [width / 2, -length / 2 + 0.75],
+    [-wid / 2, half - 0.75],
+    [wid / 2, half - 0.75],
+    [-wid / 2, -half + 0.75],
+    [wid / 2, -half + 0.75],
   ]) {
-    const wheel = new THREE.Mesh(WHEEL_GEO, WHEEL_MAT);
+    const wheel = new THREE.Mesh(TYRE_GEO, TYRE_MAT);
     wheel.rotation.z = Math.PI / 2;
     wheel.position.set(wx, 0.36, wz);
     wheel.castShadow = true;
     group.add(wheel);
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.28, 10), hubMat);
+    hub.rotation.z = Math.PI / 2;
+    hub.position.set(wx, 0.36, wz);
+    group.add(hub);
     wheels.push(wheel);
   }
 
-  return { group, wheels, length, width };
+  return { group, wheels, length: len, width: wid };
 }
 
 /** A drivable car: position, heading, speed, steering, simple collisions. */
@@ -98,8 +193,8 @@ export function createCar(scene, opts) {
     /** Arcade drive step. Returns true if it hit a building (for a thud). */
     drive(dt, input, colliders) {
       const axes = input.moveAxes();
-      const targetSteer = axes.strafe * 0.55;
-      state.steer += (targetSteer - state.steer) * Math.min(1, dt * 8);
+      const wantSteer = axes.strafe * 0.55;
+      state.steer += (wantSteer - state.steer) * Math.min(1, dt * 8);
       if (axes.forward > 0) state.speed += CAR.accel * dt * (state.sporty ? 1.25 : 1);
       if (axes.forward < 0) {
         if (state.speed > 0.5) state.speed -= CAR.brake * dt;
@@ -111,8 +206,7 @@ export function createCar(scene, opts) {
         if (Math.abs(state.speed) < 0.3) state.speed = 0;
       }
       state.speed = clamp(state.speed, -CAR.maxReverse, state.topSpeed);
-      // Forward is (sin h, cos h); pressing D (positive steer) must swing
-      // the nose toward +X, i.e. increase the heading.
+      // Forward is (sin h, cos h); D (positive steer) swings the nose +X.
       state.heading += (state.speed / 2.6) * state.steer * dt;
       const nx = state.x + Math.sin(state.heading) * state.speed * dt;
       const nz = state.z + Math.cos(state.heading) * state.speed * dt;
@@ -170,7 +264,7 @@ export function spawnParkedCars(scene, rng, spots) {
       x: spot.x,
       z: spot.z,
       heading: spot.heading,
-      color: BODY_COLORS[i % BODY_COLORS.length],
+      color: PAINTS[i % PAINTS.length],
       sporty: false,
       parked: true,
       id: 'parked-' + i,

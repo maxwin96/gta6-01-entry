@@ -1,14 +1,14 @@
-// Sunset Bay — shared tuning constants for the whole game.
-// Every number that more than one module needs lives here so the feel
-// of the city (sizes, speeds, money, wanted rules) can be tuned in one place.
+// Sunset Bay — one place for every number the game tunes by.
+// City shape, player feel, car handling, wanted rules, job payouts and
+// the sunset look all live here, so a single edit retunes the whole game.
 
 export const CITY = {
-  // One city block is a square of this size; roads run between blocks.
+  // A block is this wide; streets run in the gaps between blocks.
   block: 42,
   road: 14,
-  // Blocks per side of the square city grid.
+  // Blocks along each side of the square city.
   blocks: 7,
-  // How far the beach and ocean extend past the southern edge.
+  // How much sand sits between the last street and the water.
   beachWidth: 26,
 };
 
@@ -27,22 +27,24 @@ export const CAR = {
   maxSpeed: 34,
   maxReverse: 10,
   turnRate: 1.9,
-  // How quickly a car slows down on its own when no pedal is pressed.
+  // Natural slow-down with no pedal pressed.
   drag: 0.6,
 };
 
-// Wanted stars: 0 = clean, 5 = the whole department is after you.
+// Wanted stars run 0 (clean) to 5 (the whole department is out).
 export const WANTED = {
   max: 5,
-  // Seconds without a new crime before one star fades away.
+  // Quiet seconds before one star fades on its own.
   decaySeconds: 26,
-  // Police cars on the road per wanted star.
+  // Cruisers on the road for each star.
   policePerStar: 1,
   maxPolice: 5,
-  // How close a police car has to get to bust you on foot.
+  // How close a cruiser must get to bust you on foot.
   bustDistance: 2.2,
 };
 
+// The four jobs, in story order. The last one is the new sprint: race
+// three checkpoints down Ocean Drive to the pier before the clock dies.
 export const MISSIONS = [
   {
     id: 'package',
@@ -62,7 +64,35 @@ export const MISSIONS = [
     brief: 'The cops are onto you. Lose them — survive 60 seconds with a 3-star wanted level.',
     reward: 1200,
   },
+  {
+    id: 'sprint',
+    title: 'Sunset Sprint',
+    brief: 'Race the Ocean Drive checkpoints to the pier in 90 seconds — the cops will be watching.',
+    reward: 1500,
+  },
 ];
+
+// The sprint itself: seconds on the clock, stars while racing, and the
+// three checkpoints (east Ocean Drive, mid Ocean Drive, then the pier).
+export const SPRINT = {
+  timeLimit: 90,
+  wanted: 2,
+  checkpointRadius: 7,
+};
+
+// Golden-hour look: low sun, warm haze, long shadows.
+export const SUNSET = {
+  sunColor: 0xffb36b,
+  skyTop: 0x3a4a8f,
+  skyMid: 0xe86a92,
+  skyLow: 0xff9a4d,
+  fogColor: 0xf2a56b,
+  fogNear: 200,
+  fogFar: 640,
+  // Sun hangs low over the sea, to the south-west — high enough that the
+  // streets still catch warm light, low enough for long shadows.
+  sunDir: { x: -0.45, y: 0.42, z: 0.86 },
+};
 
 export const SAVE_KEY = 'sunset-bay-save-v1';
 export const START_MONEY = 250;

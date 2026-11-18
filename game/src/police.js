@@ -1,27 +1,89 @@
-// Wanted level and police. Crimes raise the star count; police cars spawn
-// at the city edge and chase the player, ramming their car or busting them
-// on foot. Stay out of sight (or just out of trouble) and stars fade away.
+// Wanted level and police. Crimes raise the star count; cruisers spawn
+// at the city edge and chase the player, ramming the car or busting them
+// on foot. Stay quiet and the stars fade. The cruisers now carry a big
+// roof light bar with alternating red/blue halo glow, SBPD door decals
+// and a black hood panel.
 
 import * as THREE from 'three';
 import { WANTED } from './config.js';
 import { createCar } from './vehicles.js';
 import { angleDelta, clamp, flatDistance } from './utils.js';
 
-function makeLightBar() {
+// Soft round glow texture for the light-bar halos.
+function haloTexture() {
+  const c = document.createElement('canvas');
+  c.width = 128;
+  c.height = 128;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(255,255,255,0.9)');
+  grad.addColorStop(0.4, 'rgba(255,255,255,0.35)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+const HALO_TEX = haloTexture();
+
+// Door decal: "SBPD • POLICE" in dark blue on the white door.
+function doorDecalTexture() {
+  const c = document.createElement('canvas');
+  c.width = 256;
+  c.height = 96;
+  const g = c.getContext('2d');
+  g.fillStyle = '#f2f2f2';
+  g.fillRect(0, 0, 256, 96);
+  g.fillStyle = '#14264a';
+  g.font = 'bold 34px sans-serif';
+  g.textAlign = 'center';
+  g.fillText('SBPD', 128, 42);
+  g.font = 'bold 26px sans-serif';
+  g.fillText('• POLICE •', 128, 76);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+const DECAL_TEX = doorDecalTexture();
+
+// A wide roof bar: red pod left, blue pod right, each with a halo sprite
+// that flares when its side is lit.
+function buildLightBar() {
   const group = new THREE.Group();
-  const red = new THREE.MeshLambertMaterial({ color: 0xff2222, emissive: 0xff2222, emissiveIntensity: 0.9 });
-  const blue = new THREE.MeshLambertMaterial({ color: 0x2244ff, emissive: 0x2244ff, emissiveIntensity: 0.9 });
-  const redLight = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 0.3), red);
-  redLight.position.set(-0.32, 1.45, -0.1);
-  const blueLight = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 0.3), blue);
-  blueLight.position.set(0.32, 1.45, -0.1);
-  group.add(redLight);
-  group.add(blueLight);
-  return { group, redLight, blueLight };
+  const base = new THREE.Mesh(
+    new THREE.BoxGeometry(1.5, 0.1, 0.5),
+    new THREE.MeshLambertMaterial({ color: 0x1a1c20 }),
+  );
+  base.position.set(0, 1.42, -0.1);
+  group.add(base);
+  const redMat = new THREE.MeshLambertMaterial({ color: 0xff2222, emissive: 0xff2222, emissiveIntensity: 1 });
+  const blueMat = new THREE.MeshLambertMaterial({ color: 0x2244ff, emissive: 0x2244ff, emissiveIntensity: 1 });
+  const redPod = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.3, 0.42), redMat);
+  redPod.position.set(-0.38, 1.6, -0.1);
+  group.add(redPod);
+  const bluePod = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.3, 0.42), blueMat);
+  bluePod.position.set(0.38, 1.6, -0.1);
+  group.add(bluePod);
+  const redHalo = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: HALO_TEX, color: 0xff3333, transparent: true, depthWrite: false, opacity: 0.9 }),
+  );
+  redHalo.scale.set(2.6, 2.6, 1);
+  redHalo.position.set(-0.38, 1.6, -0.1);
+  group.add(redHalo);
+  const blueHalo = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: HALO_TEX, color: 0x3355ff, transparent: true, depthWrite: false, opacity: 0.2 }),
+  );
+  blueHalo.scale.set(2.6, 2.6, 1);
+  blueHalo.position.set(0.38, 1.6, -0.1);
+  group.add(blueHalo);
+  return { group, redMat, blueMat, redHalo, blueHalo };
 }
 
 export function createPolice(scene, rng) {
-  const cruisers = []; // { car, lightBar, stuck }
+  const cruisers = []; // { car, redMat, blueMat, redHalo, blueHalo, stuck }
   let wanted = 0;
   let quietTimer = 0; // seconds since the last crime
   let flashTimer = 0;
@@ -41,17 +103,23 @@ export function createPolice(scene, rng) {
       id: 'police-' + cruisers.length + '-' + Date.now(),
       isPolice: true,
     });
-    // Black doors + light bar turn a white car into a cruiser.
-    const { group, redLight, blueLight } = makeLightBar();
-    car.group.add(group);
-    const doorMat = new THREE.MeshLambertMaterial({ color: 0x1a1c20 });
-    const doorL = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.4, 1.6), doorMat);
-    doorL.position.set(-0.96, 0.6, 0);
-    car.group.add(doorL);
-    const doorR = doorL.clone();
-    doorR.position.x = 0.96;
-    car.group.add(doorR);
-    cruisers.push({ car, redLight, blueLight, stuck: 0 });
+    // Light bar, black hood panel and SBPD door decals make it a cruiser.
+    const bar = buildLightBar();
+    car.group.add(bar.group);
+    const hoodPanel = new THREE.Mesh(
+      new THREE.BoxGeometry(1.5, 0.06, 1.0),
+      new THREE.MeshLambertMaterial({ color: 0x1a1c20 }),
+    );
+    hoodPanel.position.set(0, 0.97, 1.75);
+    car.group.add(hoodPanel);
+    const decalMat = new THREE.MeshBasicMaterial({ map: DECAL_TEX });
+    for (const side of [-1, 1]) {
+      const decal = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 0.56), decalMat);
+      decal.position.set(side * 0.99, 0.62, 0);
+      decal.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
+      car.group.add(decal);
+    }
+    cruisers.push({ car, ...bar, stuck: 0 });
   }
 
   function removeCruiser(entry) {
@@ -94,12 +162,14 @@ export function createPolice(scene, rng) {
       while (cruisers.length < want) spawnCruiser(target.x, target.z);
       while (cruisers.length > want) removeCruiser(cruisers[cruisers.length - 1]);
 
-      // Flash the light bars.
+      // Flash the bars: red and blue alternate, halos flare with them.
       flashTimer += dt;
-      const redOn = Math.floor(flashTimer * 4) % 2 === 0;
+      const redOn = Math.floor(flashTimer * 5) % 2 === 0;
       for (const entry of cruisers) {
-        entry.redLight.material.emissiveIntensity = redOn ? 1.2 : 0.15;
-        entry.blueLight.material.emissiveIntensity = redOn ? 0.15 : 1.2;
+        entry.redMat.emissiveIntensity = redOn ? 2.2 : 0.12;
+        entry.blueMat.emissiveIntensity = redOn ? 0.12 : 2.2;
+        entry.redHalo.material.opacity = redOn ? 0.95 : 0.08;
+        entry.blueHalo.material.opacity = redOn ? 0.08 : 0.95;
       }
 
       // Chase: steer toward the player, ram at close range.
